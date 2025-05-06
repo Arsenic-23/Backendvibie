@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 
 class TelegramUser(BaseModel):
-    telegram_id: int
+    user_id: int
     first_name: str
     username: str
     photo_url: str = ""
