@@ -5,4 +5,4 @@ def generate_stream_id(stream_type: str, owner_id: int) -> str:
     return f"{prefix}{owner_id}"
 
 def generate_deep_link(stream_id: str) -> str:
-    return f"https://vibie.app/join/{stream_id}"
+    return f"https://vibie_bot/join/{stream_id}"
