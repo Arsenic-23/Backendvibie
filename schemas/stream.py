@@ -1,10 +1,14 @@
-# schemas/stream.py
-
 from pydantic import BaseModel
+
+class TelegramUser(BaseModel):
+    telegram_id: int
+    first_name: str
+    username: str
+    photo_url: str = ""
 
 class UserProfile(BaseModel):
     user_id: int
-    username: str
+    name: str
     profile_pic: str = ""
 
 class CreateStreamRequest(BaseModel):
@@ -17,4 +21,4 @@ class CreateStreamResponse(BaseModel):
 
 class JoinStreamRequest(BaseModel):
     stream_id: str
-    user: UserProfile
+    user: TelegramUser
