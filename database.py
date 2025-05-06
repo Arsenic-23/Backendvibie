@@ -1,5 +1,3 @@
-# database.py
-
 from typing import Dict, List
 from collections import defaultdict
 from fastapi.websockets import WebSocket
