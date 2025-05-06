@@ -15,8 +15,15 @@ def create_stream(data: CreateStreamRequest):
 def join_stream(data: JoinStreamRequest):
     if not data.stream_id:
         raise HTTPException(status_code=400, detail="Stream ID required")
-    add_user_to_stream(data.stream_id, data.user.dict())
-    return {"message": f"{data.user.username} joined stream {data.stream_id}"}
+    
+    normalized_user = {
+        "user_id": data.user.telegram_id,
+        "name": data.user.first_name,
+        "profile_pic": data.user.photo_url or ""
+    }
+
+    add_user_to_stream(data.stream_id, normalized_user)
+    return {"message": f"{normalized_user['name']} joined stream {data.stream_id}"}
 
 @router.get("/vibers/{stream_id}", response_model=list[UserProfile])
 def get_stream_users(stream_id: str):
