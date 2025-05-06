@@ -1,4 +1,18 @@
-# models/stream.py
+from pydantic import BaseModel
 
-# Reserved for future DB model support (SQLAlchemy, etc.)
-# You can add persistent models here later if needed
+class UserProfile(BaseModel):
+    user_id: int
+    username: str
+    profile_pic: str = ""
+
+class CreateStreamRequest(BaseModel):
+    stream_type: str  # "group" or "personal"
+    owner_id: int
+
+class CreateStreamResponse(BaseModel):
+    stream_id: str
+    deep_link: str
+
+class JoinStreamRequest(BaseModel):
+    stream_id: str
+    user: UserProfile
