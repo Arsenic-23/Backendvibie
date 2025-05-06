@@ -1,5 +1,3 @@
-# routers/stream.py
-
 from fastapi import APIRouter, HTTPException
 from database import add_user_to_stream, get_users_in_stream
 from schemas.stream import CreateStreamRequest, CreateStreamResponse, JoinStreamRequest, UserProfile
