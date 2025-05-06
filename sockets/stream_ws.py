@@ -1,40 +1,31 @@
-from fastapi import WebSocket
-from database import connections, add_user_to_stream, remove_user_from_stream
-from models.stream import UserProfile
-from typing import List
+import json
+from fastapi import WebSocket, WebSocketDisconnect
+from database import (
+    register_connection,
+    unregister_connection,
+    get_users_in_stream,
+    get_connections,
+    remove_user_from_stream
+)
+
+async def broadcast_user_list(stream_id: str):
+    users = get_users_in_stream(stream_id)
+    message = json.dumps({"event": "update_vibers", "users": users})
+    for connection in get_connections(stream_id):
+        try:
+            await connection.send_text(message)
+        except Exception:
+            pass  # Ignore failed send
 
 async def stream_websocket_endpoint(websocket: WebSocket, stream_id: str, user_id: int, username: str):
-    # Connect the WebSocket
     await websocket.accept()
-    # Create user profile object
-    user_profile = UserProfile(user_id=user_id, username=username)
-
-    # Add user to the stream (in-memory store)
-    add_user_to_stream(stream_id, user_profile.dict())
-    connections[stream_id].append(websocket)
-
-    # Notify all users in the stream about the new user joining
-    await notify_stream(stream_id)
+    register_connection(stream_id, websocket)
+    await broadcast_user_list(stream_id)
 
     try:
         while True:
-            # Keep the WebSocket connection alive
-            data = await websocket.receive_text()
-            # You can handle additional WebSocket events here (e.g., chat messages)
-    except Exception as e:
-        # Handle any WebSocket disconnections
-        pass
-    finally:
-        # Remove user from stream on WebSocket disconnect
+            await websocket.receive_text()  # Can be used later for ping/pong or messaging
+    except WebSocketDisconnect:
+        unregister_connection(stream_id, websocket)
         remove_user_from_stream(stream_id, user_id)
-        connections[stream_id].remove(websocket)
-
-        # Notify remaining users about the user leaving
-        await notify_stream(stream_id)
-
-async def notify_stream(stream_id: str):
-    # Retrieve all users in the stream
-    users = [user['username'] for user in streams[stream_id]]
-    # Broadcast the list of users to all connected WebSockets
-    for connection in connections[stream_id]:
-        await connection.send_json({"users": users})
+        await broadcast_user_list(stream_id)
