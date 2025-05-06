@@ -8,7 +8,7 @@ connections: Dict[str, List[WebSocket]] = defaultdict(list)  # stream_id -> list
 
 def normalize_user(user_data: dict) -> dict:
     return {
-        "user_id": user_data["telegram_id"],
+        "user_id": user_data["user_id"],
         "name": user_data["first_name"],
         "profile_pic": user_data.get("photo_url", "")
     }
