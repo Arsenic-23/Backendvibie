@@ -17,7 +17,7 @@ def join_stream(data: JoinStreamRequest):
         raise HTTPException(status_code=400, detail="Stream ID required")
     
     normalized_user = {
-        "user_id": data.user.telegram_id,
+        "user_id": data.user.user_id,
         "name": data.user.first_name,
         "profile_pic": data.user.photo_url or ""
     }
