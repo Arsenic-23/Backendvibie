@@ -10,7 +10,7 @@ app = FastAPI(title="Vibie Backend")
 
 # ✅ CORS for Mini App (update your frontend domain here)
 origins = [
-    "https://your-miniapp.vercel.app",  # replace with your actual Mini App URL
+    "https://t.me/vibie_bot/Vibiebot",  # replace with your actual Mini App URL
     "http://localhost:3000",            # for local testing
 ]
 
