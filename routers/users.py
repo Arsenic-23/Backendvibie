@@ -1,6 +1,4 @@
-# routers/users.py
-
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlmodel import Session, select
 from db.database import get_session
 from db.models import User, Stream
@@ -9,18 +7,20 @@ from datetime import datetime
 
 router = APIRouter()
 
+# ✅ Updated to match frontend payload exactly
 class JoinRequest(BaseModel):
     telegram_id: str
     name: str
+    username: str | None = None       # ← added to fix 422
     profile_pic: str | None = None
-    stream_id: str | None = None  # Optional; fallback to telegram_id
+    stream_id: str | None = None      # Optional; fallback to telegram_id
 
 @router.post("/join")
 def join_user(data: JoinRequest, session: Session = Depends(get_session)):
-    # fallback: if no stream_id provided, use user's ID to create personal stream
+    # ✅ Fallback: if no stream_id provided, use user's own Telegram ID
     stream_id = data.stream_id or data.telegram_id
 
-    # 1. Create stream if it doesn't exist
+    # ✅ Create stream if it doesn't exist
     stream = session.exec(select(Stream).where(Stream.stream_id == stream_id)).first()
     if not stream:
         stream = Stream(stream_id=stream_id)
@@ -28,7 +28,7 @@ def join_user(data: JoinRequest, session: Session = Depends(get_session)):
         session.commit()
         session.refresh(stream)
 
-    # 2. Create or update user
+    # ✅ Create or update user record
     user = session.exec(select(User).where(User.user_id == data.telegram_id)).first()
     if user:
         user.name = data.name
