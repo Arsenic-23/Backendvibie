@@ -5,6 +5,7 @@ from sqlmodel import Session, select
 from db.database import get_session
 from db.models import Song
 from typing import List, Optional
+from pydantic import BaseModel
 
 # In-memory queue per stream
 queue_map = {}
