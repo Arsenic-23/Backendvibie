@@ -1,81 +1,88 @@
-# ws/websocket.py
-
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from db.models import User, Stream, Song
-from db.database import get_session
 from sqlmodel import Session, select
-from utils.memory import add_viber, remove_viber, active_vibers
-from routers.queue import queue_map
-from typing import Dict, List
+from db.database import get_session
+from db.models import User, Stream, Song
+from utils.memory import active_vibers, active_connections
 import json
 
-websocket_router = APIRouter()
-connections: Dict[str, List[WebSocket]] = {}
+router = APIRouter()
 
-@websocket_router.websocket("/ws/stream/{stream_id}")
-async def stream_ws(websocket: WebSocket, stream_id: str):
+def get_user_info(user: User):
+    return {
+        "user_id": user.user_id,
+        "name": user.name,
+        "profile_pic": user.profile_pic
+    }
+
+async def broadcast_to_stream(stream_id: str, message: dict):
+    for ws in active_connections.get(stream_id, []):
+        await ws.send_text(json.dumps(message))
+
+@router.websocket("/ws/stream/{stream_id}")
+async def stream_ws(websocket: WebSocket, stream_id: str, user_id: str):
     await websocket.accept()
 
-    # Parse initial user ID from query
-    params = websocket.query_params
-    user_id = params.get("user_id")
-    if not user_id:
+    session = next(get_session())
+    
+    # Get user from DB
+    user = session.exec(select(User).where(User.user_id == user_id)).first()
+    if not user:
+        await websocket.send_text(json.dumps({"error": "User not found"}))
         await websocket.close()
         return
 
-    # Get user info
-    with next(get_session()) as session:
-        user = session.exec(select(User).where(User.user_id == user_id)).first()
-        if not user:
-            await websocket.close()
-            return
+    # Add user to active vibers and connections
+    active_vibers.setdefault(stream_id, []).append(get_user_info(user))
+    active_connections.setdefault(stream_id, []).append(websocket)
 
-        # Add to memory
-        add_viber(stream_id, {
-            "user_id": user.user_id,
-            "name": user.name,
-            "profile_pic": user.profile_pic
-        })
-
-    # Register connection
-    if stream_id not in connections:
-        connections[stream_id] = []
-    connections[stream_id].append(websocket)
-
-    # Send initial sync
-    await send_sync(stream_id)
+    # Send updated stream state to everyone
+    await broadcast_to_stream(stream_id, {
+        "type": "sync",
+        "vibers": active_vibers[stream_id],
+        "now_playing": get_now_playing(session, stream_id),
+        "queue": get_queue_for_stream(session, stream_id)
+    })
 
     try:
         while True:
-            await websocket.receive_text()  # keep alive (client can ping)
+            await websocket.receive_text()  # Keep connection alive
     except WebSocketDisconnect:
-        connections[stream_id].remove(websocket)
-        remove_viber(stream_id, user_id)
-        await send_sync(stream_id)
+        # Remove user from memory
+        active_vibers[stream_id] = [v for v in active_vibers[stream_id] if v["user_id"] != user_id]
+        active_connections[stream_id].remove(websocket)
 
-# 🔄 Sync broadcast
-async def send_sync(stream_id: str):
-    with next(get_session()) as session:
-        stream = session.exec(select(Stream).where(Stream.stream_id == stream_id)).first()
-        now_playing = None
-        if stream and stream.now_playing_song_id:
-            song = session.exec(select(Song).where(Song.song_id == stream.now_playing_song_id)).first()
-            if song:
-                now_playing = {
-                    "song_id": song.song_id,
-                    "title": song.title,
-                    "artist": song.artist,
-                    "duration": song.duration,
-                    "thumbnail_url": song.thumbnail_url,
-                    "start_time": stream.start_time.isoformat() if stream.start_time else None
-                }
+        # Update remaining users
+        await broadcast_to_stream(stream_id, {
+            "type": "sync",
+            "vibers": active_vibers[stream_id],
+            "now_playing": get_now_playing(session, stream_id),
+            "queue": get_queue_for_stream(session, stream_id)
+        })
 
-    payload = {
-        "type": "sync",
-        "now_playing": now_playing,
-        "queue": queue_map.get(stream_id, []),
-        "vibers": active_vibers.get(stream_id, [])
-    }
+# Utility to get now playing song details
+def get_now_playing(session: Session, stream_id: str):
+    stream = session.exec(select(Stream).where(Stream.stream_id == stream_id)).first()
+    if not stream or not stream.now_playing_song_id:
+        return None
 
-    for ws in connections.get(stream_id, []):
-        await ws.send_text(json.dumps(payload))
+    song = session.exec(select(Song).where(Song.id == stream.now_playing_song_id)).first()
+    return {
+        "id": song.id,
+        "title": song.title,
+        "artist": song.artist,
+        "thumbnail": song.thumbnail,
+        "url": song.url
+    } if song else None
+
+# Utility to get queue for stream
+def get_queue_for_stream(session: Session, stream_id: str):
+    return [
+        {
+            "id": song.id,
+            "title": song.title,
+            "artist": song.artist,
+            "thumbnail": song.thumbnail,
+            "url": song.url
+        }
+        for song in session.exec(select(Song).where(Song.stream_id == stream_id)).all()
+    ]
