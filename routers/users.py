@@ -3,22 +3,23 @@ from sqlmodel import Session, select
 from db.database import get_session
 from db.models import User, Stream
 from pydantic import BaseModel
-from datetime import datetime
+from typing import Union
 
 router = APIRouter()
 
-# ✅ Updated to match frontend payload exactly
+# ✅ Accept both integers and strings
 class JoinRequest(BaseModel):
-    telegram_id: str
+    telegram_id: Union[str, int]
     name: str
-    username: str | None = None       # ← added to fix 422
+    username: str | None = None
     profile_pic: str | None = None
-    stream_id: str | None = None      # Optional; fallback to telegram_id
+    stream_id: Union[str, int] | None = None
 
 @router.post("/join")
 def join_user(data: JoinRequest, session: Session = Depends(get_session)):
-    # ✅ Fallback: if no stream_id provided, use user's own Telegram ID
-    stream_id = data.stream_id or data.telegram_id
+    # ✅ Ensure consistent string format for IDs
+    telegram_id = str(data.telegram_id)
+    stream_id = str(data.stream_id or data.telegram_id)
 
     # ✅ Create stream if it doesn't exist
     stream = session.exec(select(Stream).where(Stream.stream_id == stream_id)).first()
@@ -28,15 +29,15 @@ def join_user(data: JoinRequest, session: Session = Depends(get_session)):
         session.commit()
         session.refresh(stream)
 
-    # ✅ Create or update user record
-    user = session.exec(select(User).where(User.user_id == data.telegram_id)).first()
+    # ✅ Create or update user
+    user = session.exec(select(User).where(User.user_id == telegram_id)).first()
     if user:
         user.name = data.name
         user.profile_pic = data.profile_pic
         user.current_stream_id = stream_id
     else:
         user = User(
-            user_id=data.telegram_id,
+            user_id=telegram_id,
             name=data.name,
             profile_pic=data.profile_pic,
             current_stream_id=stream_id
