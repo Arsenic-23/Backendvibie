@@ -1,17 +1,14 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 from db.database import init_db
-from routers import users, stream, queue, websockets  # ✅ fix here
+from routers import users, stream, queue
+from ws.websocket import router as websocket_router  # ✅ CORRECTED
 
 app = FastAPI(title="Vibie Backend 🎧")
 
-origins = [
-    "*",
-    "http://localhost:3000",
-    "https://t.me/vibie_bot",
-    "https://vibie.vercel.app",
-]
-
+# ✅ CORS
+origins = ["*", "http://localhost:3000", "https://vibie.vercel.app"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -20,13 +17,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ✅ Init DB
 init_db()
 
+# ✅ Include routers
 app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(stream.router, prefix="/stream", tags=["Stream"])
 app.include_router(queue.router, prefix="/queue", tags=["Queue"])
-app.include_router(websockets.router)  # ✅ fix here too
+app.include_router(websocket_router)  # ✅ no prefix
 
+# ✅ Health check
 @app.get("/")
 def root():
     return {"message": "Vibie Backend is Live 🎧"}
