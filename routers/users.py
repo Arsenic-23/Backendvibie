@@ -1,5 +1,3 @@
-# routers/users.py
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 from db.database import get_session
@@ -22,15 +20,14 @@ def join_user(data: JoinRequest, session: Session = Depends(get_session)):
         telegram_id = str(data.telegram_id)
         stream_id = str(data.stream_id or data.telegram_id)
 
-        # Check or create stream
+        # Create or fetch stream
         stream = session.exec(select(Stream).where(Stream.stream_id == stream_id)).first()
         if not stream:
             stream = Stream(stream_id=stream_id)
             session.add(stream)
             session.commit()
-            session.refresh(stream)
 
-        # Check or create user
+        # Create or update user
         user = session.exec(select(User).where(User.user_id == telegram_id)).first()
         if user:
             user.name = data.name
@@ -46,18 +43,18 @@ def join_user(data: JoinRequest, session: Session = Depends(get_session)):
             session.add(user)
 
         session.commit()
-        session.refresh(user)
 
+        # ✅ Manually construct safe response (no session.refresh)
         return {
             "message": "User joined stream successfully.",
             "user": {
-                "user_id": user.user_id,
-                "name": user.name,
-                "profile_pic": user.profile_pic
+                "user_id": telegram_id,
+                "name": data.name,
+                "profile_pic": data.profile_pic
             },
             "stream_id": stream_id
         }
 
     except Exception as e:
-        print(f"[JOIN ERROR] {e}")
-        raise HTTPException(status_code=500, detail="Failed to join stream.")
+        print(f"[JOIN ERROR]: {e}")
+        raise HTTPException(status_code=500, detail="Join failed")
