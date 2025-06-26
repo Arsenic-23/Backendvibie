@@ -1,5 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 sqlmodel
 psycopg2-binary
 python-dotenv
