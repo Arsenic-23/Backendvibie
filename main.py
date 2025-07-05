@@ -4,6 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from db.database import init_db
 from routers import users, stream, queue
 from ws.websocket import router as websocket_router  # ✅ CORRECTED
+from routers import search
+app.include_router(search.router)
 
 app = FastAPI(title="Vibie Backend 🎧")
 
