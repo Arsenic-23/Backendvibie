@@ -2,12 +2,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from db.database import init_db
-from routers import users, stream, queue
-from ws.websocket import router as websocket_router  # ✅ CORRECTED
-from routers import search
-app.include_router(search.router)
+from routers import users, stream, queue, search
+from ws.websocket import router as websocket_router
 
-app = FastAPI(title="Vibie Backend 🎧")
+app = FastAPI(title="Vibie Backend 🎧")  # ✅ Move this up here
 
 # ✅ CORS
 origins = ["*", "http://localhost:3000", "https://vibie.vercel.app"]
@@ -23,6 +21,7 @@ app.add_middleware(
 init_db()
 
 # ✅ Include routers
+app.include_router(search.router)  # ✅ Now it's safe
 app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(stream.router, prefix="/stream", tags=["Stream"])
 app.include_router(queue.router, prefix="/queue", tags=["Queue"])
