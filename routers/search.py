@@ -1,21 +1,14 @@
 from fastapi import APIRouter, Query
-from typing import Optional
 from youtubesearchpython import VideosSearch
 
 router = APIRouter(prefix="/search", tags=["Search"])
 
 @router.get("/")
-def search_youtube(q: str = Query(...), limit: int = 10, page_token: Optional[str] = None):
+def search_youtube(q: str = Query(..., description="Search query")):
     try:
-        # Initial search
-        videos_search = VideosSearch(q, limit=limit)
-        
-        # Use page token if provided
-        if page_token:
-            videos_search.next()
-        
+        # Search YouTube with the given query, fixed 10 results
+        videos_search = VideosSearch(q, limit=10)
         results = videos_search.result().get("result", [])
-        next_token = videos_search.result().get("next", None)
 
         parsed_results = []
         for item in results:
@@ -28,10 +21,7 @@ def search_youtube(q: str = Query(...), limit: int = 10, page_token: Optional[st
                 "channel": item["channel"]["name"] if item.get("channel") else None
             })
 
-        return {
-            "results": parsed_results,
-            "nextPageToken": next_token  # Send this back to frontend for next fetch
-        }
+        return {"results": parsed_results}
 
     except Exception as e:
         return {"error": str(e)}
