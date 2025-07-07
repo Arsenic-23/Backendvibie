@@ -1,4 +1,4 @@
-rom fastapi import APIRouter, Query
+from fastapi import APIRouter, Query
 from typing import List
 from youtubesearchpython import Suggestions
 
