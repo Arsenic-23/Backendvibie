@@ -7,7 +7,7 @@ router = APIRouter(prefix="/search", tags=["Search"])
 def search_youtube(q: str = Query(..., description="Search query")):
     try:
         # Perform YouTube search for the query, always return 10 results
-        videos_search = VideosSearch(q, limit=30)
+        videos_search = VideosSearch(q, limit=50)
         results = videos_search.result().get("result", [])
 
         parsed_results = []
