@@ -1,14 +1,18 @@
 from fastapi import APIRouter, Query
 from typing import List
-from youtubesearchpython import Suggestions
 
 router = APIRouter(prefix="/suggest", tags=["Suggestions"])
 
+class Suggestions:
+    @staticmethod
+    def get(query: str) -> List[str]:
+        # Replace with your actual suggestion logic
+        return [f"{query} suggestion 1", f"{query} suggestion 2"]
+
 @router.get("/")
-def suggest(q: str = Query(...)) -> dict:
+def get_suggestions(q: str = Query(...)):
     try:
-        suggestion_result = Suggestions(q).get()
-        suggestions = suggestion_result.get("suggestions", [])
-        return {"results": suggestions[:10]}
+        suggestions = Suggestions.get(q)
+        return {"results": suggestions}
     except Exception as e:
         return {"results": [], "error": str(e)}
