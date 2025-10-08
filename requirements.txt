@@ -6,3 +6,4 @@ python-dotenv
 youtube-search-python
 httpx<0.25
 yt-dlp
+browser-cookie3
