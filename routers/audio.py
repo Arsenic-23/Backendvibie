@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query
 import yt_dlp
+import os
 
 router = APIRouter(prefix="/audio", tags=["Audio"])
 
@@ -9,6 +10,8 @@ YOUTUBE_URL = "https://www.youtube.com/watch?v="
 async def fetch_audio_url(video_id: str = Query(..., description="YouTube video ID")):
     try:
         url = f"{YOUTUBE_URL}{video_id}"
+        cookie_path = os.path.join(os.getcwd(), "cookies.txt")
+
         ydl_opts = {
             "quiet": True,
             "skip_download": True,
@@ -17,8 +20,9 @@ async def fetch_audio_url(video_id: str = Query(..., description="YouTube video 
             "noplaylist": True,
         }
 
-        # Optional: Use cookies if you want premium reliability
-        # ydl_opts["cookiefile"] = "./cookies.txt"
+        # ✅ Use cookies if the file exists (adds reliability for restricted or bot-blocked videos)
+        if os.path.exists(cookie_path):
+            ydl_opts["cookiefile"] = cookie_path
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
