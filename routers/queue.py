@@ -1,16 +1,14 @@
-# routers/queue.py
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 from db.database import get_session
 from db.models import Song
-from typing import List, Optional
+from typing import Optional
 from pydantic import BaseModel
 
-# In-memory queue per stream
-queue_map = {}
-
 router = APIRouter()
+
+# In-memory queues
+queue_map = {}
 
 class AddSongRequest(BaseModel):
     stream_id: str
@@ -23,7 +21,6 @@ class AddSongRequest(BaseModel):
 
 @router.post("/add")
 def add_song_to_queue(data: AddSongRequest, session: Session = Depends(get_session)):
-    # Save song to DB if not exists
     song = session.exec(select(Song).where(Song.song_id == data.song_id)).first()
     if not song:
         song = Song(
@@ -37,23 +34,23 @@ def add_song_to_queue(data: AddSongRequest, session: Session = Depends(get_sessi
         session.add(song)
         session.commit()
 
-    # Add to in-memory queue
-    if data.stream_id not in queue_map:
-        queue_map[data.stream_id] = []
-    queue_map[data.stream_id].append(data.song_id)
-
-    return {"message": "Song added to queue", "queue": queue_map[data.stream_id]}
+    queue = queue_map.setdefault(data.stream_id, [])
+    queue.append(data.song_id)
+    return {"message": "Song added to queue", "queue": queue}
 
 @router.get("/{stream_id}")
 def get_queue(stream_id: str, session: Session = Depends(get_session)):
-    # Return full song info from queue
     song_ids = queue_map.get(stream_id, [])
     if not song_ids:
         return {"queue": []}
-
     songs = session.exec(select(Song).where(Song.song_id.in_(song_ids))).all()
-    # Preserve order
-    song_dict = {song.song_id: song for song in songs}
+    song_dict = {s.song_id: s for s in songs}
     ordered_queue = [song_dict[sid] for sid in song_ids if sid in song_dict]
-
     return {"queue": ordered_queue}
+
+@router.delete("/{stream_id}/pop")
+def pop_song(stream_id: str):
+    if stream_id not in queue_map or not queue_map[stream_id]:
+        raise HTTPException(status_code=404, detail="Queue empty")
+    removed = queue_map[stream_id].pop(0)
+    return {"message": "Song removed", "removed_song_id": removed}
