@@ -42,10 +42,23 @@ class PlayNextRequest(BaseModel):
 # ----------------------------
 @router.post("/create")
 def create_stream(data: CreateStreamRequest, session: Session = Depends(get_session)):
+    """Create a new stream with user as admin and participant. Creates user if not exists."""
+
+    # Fetch or create user
     user = session.exec(select(User).where(User.user_id == data.user_id)).first()
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        user = User(
+            user_id=data.user_id,
+            name=f"User {data.user_id}",
+            username=None,
+            profile_pic=None,
+            current_stream_id=None
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
 
+    # Create unique stream ID
     stream_id = str(uuid.uuid4())[:8]
     new_stream = Stream(
         stream_id=stream_id,
@@ -59,6 +72,7 @@ def create_stream(data: CreateStreamRequest, session: Session = Depends(get_sess
         start_time=datetime.utcnow(),
         created_at=datetime.utcnow()
     )
+
     session.add(new_stream)
     user.current_stream_id = stream_id
     session.commit()
@@ -76,13 +90,26 @@ def create_stream(data: CreateStreamRequest, session: Session = Depends(get_sess
 # ----------------------------
 @router.post("/join")
 def join_stream(data: JoinStreamRequest, session: Session = Depends(get_session)):
+    """Join an existing stream. Creates user if not exists."""
+
+    # Fetch stream
     stream = session.exec(select(Stream).where(Stream.stream_id == data.stream_id)).first()
     if not stream:
         raise HTTPException(status_code=404, detail="Stream not found")
 
+    # Fetch or create user
     user = session.exec(select(User).where(User.user_id == data.user_id)).first()
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        user = User(
+            user_id=data.user_id,
+            name=f"User {data.user_id}",
+            username=None,
+            profile_pic=None,
+            current_stream_id=None
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
 
     if data.user_id in stream.blocked:
         raise HTTPException(status_code=403, detail="You are blocked from this stream")
@@ -138,6 +165,7 @@ def remove_user(data: RemoveUserRequest, session: Session = Depends(get_session)
 
     if data.user_id in stream.participants:
         stream.participants.remove(data.user_id)
+
     user.current_stream_id = None
     session.commit()
     return {"message": f"User {user.name} removed from stream {data.stream_id}"}
