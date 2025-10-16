@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from typing import Union
 import uuid
 
-router = APIRouter()
+router = APIRouter(prefix="/user", tags=["User"])
 
 class JoinRequest(BaseModel):
     telegram_id: Union[str, int]
@@ -17,21 +17,29 @@ class JoinRequest(BaseModel):
 
 @router.post("/join")
 def join_user(data: JoinRequest, session: Session = Depends(get_session)):
-    """Create or join user to a stream. Creates a new stream if none provided."""
     telegram_id = str(data.telegram_id)
     stream_id = str(data.stream_id) if data.stream_id else str(uuid.uuid4())[:8]
 
     # Fetch or create stream
     stream = session.exec(select(Stream).where(Stream.stream_id == stream_id)).first()
     if not stream:
-        stream = Stream(stream_id=stream_id, admin_id=telegram_id)
+        stream = Stream(
+            stream_id=stream_id,
+            admins=[telegram_id],
+            participants=[telegram_id],
+            blocked=[],
+            queue=[],
+            now_playing_song_id=None,
+            visibility="public",
+            title=f"{data.name}'s Stream"
+        )
         session.add(stream)
-        session.commit()
 
     # Fetch or create user
     user = session.exec(select(User).where(User.user_id == telegram_id)).first()
     if user:
         user.name = data.name
+        user.username = data.username
         user.profile_pic = data.profile_pic
         user.current_stream_id = stream_id
     else:
@@ -44,13 +52,19 @@ def join_user(data: JoinRequest, session: Session = Depends(get_session)):
         )
         session.add(user)
 
+    if telegram_id not in stream.participants:
+        stream.participants.append(telegram_id)
+
     session.commit()
+    session.refresh(user)
+    session.refresh(stream)
 
     return {
-        "message": "User joined stream successfully.",
+        "message": "User joined stream successfully",
         "user": {
             "user_id": telegram_id,
             "name": data.name,
+            "username": data.username,
             "profile_pic": data.profile_pic
         },
         "stream_id": stream_id
