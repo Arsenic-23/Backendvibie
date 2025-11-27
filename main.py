@@ -3,17 +3,17 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from db.database import init_db
 
-# NEW robust routers
+# NEW robust stream system routers
 from routers.stream import router as stream_router
 from routers.queue import router as queue_router
 from ws.websocket import router as websocket_router
 
-# Keep your existing search, suggest, audio (these are fine)
-from routers import search, suggest, audio
+# Existing independent routers
+from routers import search, suggest, audio, analytics
+
 
 app = FastAPI(title="Vibie Backend 🎧")
 
-# CORS settings (update for production later)
 origins = [
     "*",
     "http://localhost:3000",
@@ -28,20 +28,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize DB
 init_db()
 
-# Register routers (ONLY the new ones)
+# General utilities
 app.include_router(suggest.router)
 app.include_router(search.router)
 app.include_router(audio.router, prefix="/audio", tags=["Audio"])
 
-# NEW stream system
+# NEW stream ecosystem (main feature)
 app.include_router(stream_router, prefix="/stream", tags=["Stream"])
 app.include_router(queue_router, prefix="/queue", tags=["Queue"])
 app.include_router(websocket_router)
 
-# Root
+# Analytics system
+app.include_router(analytics.router, prefix="/analytics", tags=["Analytics"])
+
 @app.get("/")
 def root():
-    return {"message": "Vibie Backend is Live 🎧 (New Stream System Active)"}
+    return {
+        "message": "Vibie Backend is Live 🎧",
+        "stream_system": "Active",
+        "analytics": "Active"
+    }
