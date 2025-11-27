@@ -1,80 +1,80 @@
+# routers/stream.py
 from fastapi import APIRouter, Depends, HTTPException
-from sqlmodel import Session, select
+from sqlmodel import Session, select, func
 from db.database import get_session
-from db.models import Stream, User, Song
+from db.models import Stream, User, StreamParticipant, StreamQueueItem, Song
 from pydantic import BaseModel
 from typing import Optional
 import uuid
 from datetime import datetime
+from utils.notify import notify_stream_background
 
 router = APIRouter(prefix="/stream", tags=["Stream"])
 
-# ----------------------------
-# Request Models
-# ----------------------------
+
 class CreateStreamRequest(BaseModel):
-    user_id: str
+    user_id: str      # Firebase uid
     title: Optional[str] = None
     visibility: Optional[str] = "public"
+
 
 class JoinStreamRequest(BaseModel):
     user_id: str
     stream_id: str
 
+
 class LeaveStreamRequest(BaseModel):
     user_id: str
     stream_id: str
 
-class RemoveUserRequest(BaseModel):
-    admin_id: str
-    user_id: str
-    stream_id: str
-
-class AddSongRequest(BaseModel):
-    stream_id: str
-    song_id: str
 
 class PlayNextRequest(BaseModel):
     stream_id: str
+    user_id: str  # who is triggering (for permissions later)
 
-# ----------------------------
-# Create Stream
-# ----------------------------
-@router.post("/create")
-def create_stream(data: CreateStreamRequest, session: Session = Depends(get_session)):
-    """Create a new stream with user as admin and participant. Creates user if not exists."""
 
-    # Fetch or create user
-    user = session.exec(select(User).where(User.user_id == data.user_id)).first()
+def ensure_user(session: Session, user_id: str, name: Optional[str] = None) -> User:
+    user = session.exec(
+        select(User).where(User.user_id == user_id)
+    ).first()
     if not user:
         user = User(
-            user_id=data.user_id,
-            name=f"User {data.user_id}",
-            username=None,
-            profile_pic=None,
-            current_stream_id=None
+            user_id=user_id,
+            name=name or f"User {user_id}",
         )
         session.add(user)
         session.commit()
         session.refresh(user)
+    return user
 
-    # Create unique stream ID
+
+@router.post("/create")
+def create_stream(data: CreateStreamRequest, session: Session = Depends(get_session)):
+    user = ensure_user(session, data.user_id)
+
+    # Short stream id as code
     stream_id = str(uuid.uuid4())[:8]
+
     new_stream = Stream(
         stream_id=stream_id,
-        admins=[data.user_id],
-        participants=[data.user_id],
-        blocked=[],
-        queue=[],
-        now_playing_song_id=None,
-        visibility=data.visibility,
+        host_id=user.user_id,
+        visibility=data.visibility or "public",
         title=data.title or f"{user.name}'s Stream",
+        playback_status="stopped",
+        playback_position_ms=0,
+        playback_updated_at=None,
         start_time=datetime.utcnow(),
-        created_at=datetime.utcnow()
+        created_at=datetime.utcnow(),
     )
-
     session.add(new_stream)
-    user.current_stream_id = stream_id
+
+    participant = StreamParticipant(
+        stream_id=stream_id,
+        user_id=user.user_id,
+        is_admin=True,
+    )
+    session.add(participant)
+
     session.commit()
     session.refresh(new_stream)
 
@@ -82,123 +82,163 @@ def create_stream(data: CreateStreamRequest, session: Session = Depends(get_sess
         "message": "Stream created successfully",
         "stream_id": new_stream.stream_id,
         "title": new_stream.title,
-        "visibility": new_stream.visibility
+        "visibility": new_stream.visibility,
     }
 
-# ----------------------------
-# Join Stream
-# ----------------------------
+
 @router.post("/join")
 def join_stream(data: JoinStreamRequest, session: Session = Depends(get_session)):
-    """Join an existing stream. Creates user if not exists."""
-
-    # Fetch stream
-    stream = session.exec(select(Stream).where(Stream.stream_id == data.stream_id)).first()
+    stream = session.exec(
+        select(Stream).where(Stream.stream_id == data.stream_id)
+    ).first()
     if not stream:
         raise HTTPException(status_code=404, detail="Stream not found")
 
-    # Fetch or create user
-    user = session.exec(select(User).where(User.user_id == data.user_id)).first()
-    if not user:
-        user = User(
-            user_id=data.user_id,
-            name=f"User {data.user_id}",
-            username=None,
-            profile_pic=None,
-            current_stream_id=None
+    user = ensure_user(session, data.user_id)
+
+    participant = session.exec(
+        select(StreamParticipant).where(
+            (StreamParticipant.stream_id == data.stream_id)
+            & (StreamParticipant.user_id == data.user_id)
         )
-        session.add(user)
+    ).first()
+
+    if not participant:
+        participant = StreamParticipant(
+            stream_id=data.stream_id,
+            user_id=data.user_id,
+            is_admin=False,
+        )
+        session.add(participant)
         session.commit()
-        session.refresh(user)
 
-    if data.user_id in stream.blocked:
-        raise HTTPException(status_code=403, detail="You are blocked from this stream")
+    return {
+        "message": f"{user.name} joined stream {data.stream_id}",
+    }
 
-    if data.user_id not in stream.participants:
-        stream.participants.append(data.user_id)
 
-    user.current_stream_id = stream.stream_id
-    session.commit()
-    session.refresh(stream)
-
-    return {"message": f"{user.name} joined stream {data.stream_id}", "participants": stream.participants}
-
-# ----------------------------
-# Leave Stream
-# ----------------------------
 @router.post("/leave")
 def leave_stream(data: LeaveStreamRequest, session: Session = Depends(get_session)):
-    stream = session.exec(select(Stream).where(Stream.stream_id == data.stream_id)).first()
-    user = session.exec(select(User).where(User.user_id == data.user_id)).first()
-
-    if not stream or not user:
-        raise HTTPException(status_code=404, detail="Stream or User not found")
-
-    if data.user_id in stream.participants:
-        stream.participants.remove(data.user_id)
-    if data.user_id in stream.admins:
-        stream.admins.remove(data.user_id)
-
-    user.current_stream_id = None
-
-    if not stream.participants:
-        session.delete(stream)
-
-    session.commit()
-    return {"message": f"{user.name} left the stream {data.stream_id}"}
-
-# ----------------------------
-# Remove User (Admin Only)
-# ----------------------------
-@router.post("/remove_user")
-def remove_user(data: RemoveUserRequest, session: Session = Depends(get_session)):
-    stream = session.exec(select(Stream).where(Stream.stream_id == data.stream_id)).first()
+    stream = session.exec(
+        select(Stream).where(Stream.stream_id == data.stream_id)
+    ).first()
     if not stream:
         raise HTTPException(status_code=404, detail="Stream not found")
 
-    if data.admin_id not in stream.admins:
-        raise HTTPException(status_code=403, detail="Only admins can remove users")
+    participant = session.exec(
+        select(StreamParticipant).where(
+            (StreamParticipant.stream_id == data.stream_id)
+            & (StreamParticipant.user_id == data.user_id)
+        )
+    ).first()
 
-    user = session.exec(select(User).where(User.user_id == data.user_id)).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    if not participant:
+        raise HTTPException(status_code=404, detail="User not in stream")
 
-    if data.user_id in stream.participants:
-        stream.participants.remove(data.user_id)
-
-    user.current_stream_id = None
+    session.delete(participant)
     session.commit()
-    return {"message": f"User {user.name} removed from stream {data.stream_id}"}
 
-# ----------------------------
-# Add Song
-# ----------------------------
-@router.post("/queue/add")
-def add_song_to_queue(data: AddSongRequest, session: Session = Depends(get_session)):
-    stream = session.exec(select(Stream).where(Stream.stream_id == data.stream_id)).first()
-    song = session.exec(select(Song).where(Song.song_id == data.song_id)).first()
-    if not stream or not song:
-        raise HTTPException(status_code=404, detail="Stream or Song not found")
-    stream.queue.append(song.song_id)
-    session.commit()
-    return {"message": f"Song '{song.title}' added", "queue": stream.queue}
+    # If no participants left, you can either delete the stream or leave it
+    remaining = session.exec(
+        select(func.count()).select_from(StreamParticipant).where(
+            StreamParticipant.stream_id == data.stream_id
+        )
+    ).one()
 
-# ----------------------------
-# Play Next Song
-# ----------------------------
+    if remaining[0] == 0:
+        # For now, just keep the stream; you can choose to delete or mark inactive.
+        pass
+
+    return {
+        "message": f"User {data.user_id} left the stream {data.stream_id}",
+    }
+
+
 @router.post("/queue/next")
 def play_next(data: PlayNextRequest, session: Session = Depends(get_session)):
-    stream = session.exec(select(Stream).where(Stream.stream_id == data.stream_id)).first()
+    """
+    Advance to next track in queue and update global player state.
+    """
+    stream = session.exec(
+        select(Stream).where(Stream.stream_id == data.stream_id)
+    ).first()
     if not stream:
         raise HTTPException(status_code=404, detail="Stream not found")
 
-    if not stream.queue:
-        stream.now_playing_song_id = None
+    # Mark current as played
+    if stream.current_queue_item_id:
+        current_item = session.exec(
+            select(StreamQueueItem).where(
+                StreamQueueItem.id == stream.current_queue_item_id
+            )
+        ).first()
+        if current_item:
+            current_item.status = "played"
+            session.add(current_item)
+
+    # Find next queued item
+    next_item = session.exec(
+        select(StreamQueueItem)
+        .where(
+            (StreamQueueItem.stream_id == data.stream_id)
+            & (StreamQueueItem.status == "queued")
+        )
+        .order_by(StreamQueueItem.position.asc())
+    ).first()
+
+    if not next_item:
+        # No more songs
+        stream.current_queue_item_id = None
+        stream.playback_status = "stopped"
+        stream.playback_position_ms = 0
+        stream.playback_updated_at = datetime.utcnow()
+        session.add(stream)
         session.commit()
+
+        notify_stream_background(
+            data.stream_id,
+            "PLAYER_STATE_UPDATED",
+            {
+                "now_playing": None,
+            },
+        )
         return {"message": "Queue is empty"}
 
-    next_song_id = stream.queue.pop(0)
-    stream.now_playing_song_id = next_song_id
+    # Set next as playing
+    next_item.status = "playing"
+    stream.current_queue_item_id = next_item.id
+    stream.playback_status = "playing"
+    stream.playback_position_ms = 0
+    stream.playback_updated_at = datetime.utcnow()
+
+    session.add(next_item)
+    session.add(stream)
     session.commit()
-    song = session.exec(select(Song).where(Song.song_id == next_song_id)).first()
-    return {"message": f"Now playing: {song.title}", "queue": stream.queue}
+
+    # Build payload
+    song = session.exec(
+        select(Song).where(Song.song_id == next_item.song_id)
+    ).first()
+
+    now_playing = {
+        "queue_item_id": next_item.id,
+        "song_id": song.song_id if song else next_item.song_id,
+        "title": song.title if song else None,
+        "artist": song.artist if song else None,
+        "thumbnail_url": song.thumbnail_url if song else None,
+        "audio_url": song.audio_url if song else None,
+        "status": stream.playback_status,
+        "position_ms": stream.playback_position_ms,
+        "updated_at": stream.playback_updated_at.isoformat(),
+    }
+
+    notify_stream_background(
+        data.stream_id,
+        "PLAYER_STATE_UPDATED",
+        {"now_playing": now_playing},
+    )
+
+    return {
+        "message": f"Now playing: {now_playing['title']}",
+        "now_playing": now_playing,
+    }
