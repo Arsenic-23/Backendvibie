@@ -13,7 +13,7 @@ router = APIRouter(prefix="/stream", tags=["Stream"])
 
 
 class CreateStreamRequest(BaseModel):
-    user_id: str      # Firebase uid
+    user_id: str
     title: Optional[str] = None
     visibility: Optional[str] = "public"
 
@@ -30,13 +30,17 @@ class LeaveStreamRequest(BaseModel):
 
 class PlayNextRequest(BaseModel):
     stream_id: str
-    user_id: str  # who is triggering (for permissions later)
+    user_id: str
 
 
 def ensure_user(session: Session, user_id: str, name: Optional[str] = None) -> User:
+    """
+    Ensures a user exists in DB. Creates if not found.
+    """
     user = session.exec(
         select(User).where(User.user_id == user_id)
     ).first()
+
     if not user:
         user = User(
             user_id=user_id,
@@ -45,14 +49,15 @@ def ensure_user(session: Session, user_id: str, name: Optional[str] = None) -> U
         session.add(user)
         session.commit()
         session.refresh(user)
+
     return user
 
 
 @router.post("/create")
 def create_stream(data: CreateStreamRequest, session: Session = Depends(get_session)):
+
     user = ensure_user(session, data.user_id)
 
-    # Short stream id as code
     stream_id = str(uuid.uuid4())[:8]
 
     new_stream = Stream(
@@ -66,6 +71,7 @@ def create_stream(data: CreateStreamRequest, session: Session = Depends(get_sess
         start_time=datetime.utcnow(),
         created_at=datetime.utcnow(),
     )
+
     session.add(new_stream)
 
     participant = StreamParticipant(
@@ -88,9 +94,11 @@ def create_stream(data: CreateStreamRequest, session: Session = Depends(get_sess
 
 @router.post("/join")
 def join_stream(data: JoinStreamRequest, session: Session = Depends(get_session)):
+
     stream = session.exec(
         select(Stream).where(Stream.stream_id == data.stream_id)
     ).first()
+
     if not stream:
         raise HTTPException(status_code=404, detail="Stream not found")
 
@@ -113,15 +121,16 @@ def join_stream(data: JoinStreamRequest, session: Session = Depends(get_session)
         session.commit()
 
     return {
-        "message": f"{user.name} joined stream {data.stream_id}",
+        "message": f"{user.name} joined stream {data.stream_id}"
     }
-
 
 @router.post("/leave")
 def leave_stream(data: LeaveStreamRequest, session: Session = Depends(get_session)):
+
     stream = session.exec(
         select(Stream).where(Stream.stream_id == data.stream_id)
     ).first()
+
     if not stream:
         raise HTTPException(status_code=404, detail="Stream not found")
 
@@ -138,45 +147,36 @@ def leave_stream(data: LeaveStreamRequest, session: Session = Depends(get_sessio
     session.delete(participant)
     session.commit()
 
-    # If no participants left, you can either delete the stream or leave it
     remaining = session.exec(
         select(func.count()).select_from(StreamParticipant).where(
             StreamParticipant.stream_id == data.stream_id
         )
     ).one()
 
-    if remaining[0] == 0:
-        # For now, just keep the stream; you can choose to delete or mark inactive.
-        pass
-
     return {
-        "message": f"User {data.user_id} left the stream {data.stream_id}",
+        "message": f"User {data.user_id} left the stream {data.stream_id}"
     }
 
 
 @router.post("/queue/next")
 def play_next(data: PlayNextRequest, session: Session = Depends(get_session)):
-    """
-    Advance to next track in queue and update global player state.
-    """
+
     stream = session.exec(
         select(Stream).where(Stream.stream_id == data.stream_id)
     ).first()
+
     if not stream:
         raise HTTPException(status_code=404, detail="Stream not found")
 
-    # Mark current as played
     if stream.current_queue_item_id:
         current_item = session.exec(
-            select(StreamQueueItem).where(
-                StreamQueueItem.id == stream.current_queue_item_id
-            )
+            select(StreamQueueItem).where(StreamQueueItem.id == stream.current_queue_item_id)
         ).first()
+
         if current_item:
             current_item.status = "played"
             session.add(current_item)
 
-    # Find next queued item
     next_item = session.exec(
         select(StreamQueueItem)
         .where(
@@ -187,24 +187,22 @@ def play_next(data: PlayNextRequest, session: Session = Depends(get_session)):
     ).first()
 
     if not next_item:
-        # No more songs
         stream.current_queue_item_id = None
         stream.playback_status = "stopped"
         stream.playback_position_ms = 0
         stream.playback_updated_at = datetime.utcnow()
+
         session.add(stream)
         session.commit()
 
         notify_stream_background(
             data.stream_id,
             "PLAYER_STATE_UPDATED",
-            {
-                "now_playing": None,
-            },
+            {"now_playing": None},
         )
+
         return {"message": "Queue is empty"}
 
-    # Set next as playing
     next_item.status = "playing"
     stream.current_queue_item_id = next_item.id
     stream.playback_status = "playing"
@@ -215,7 +213,6 @@ def play_next(data: PlayNextRequest, session: Session = Depends(get_session)):
     session.add(stream)
     session.commit()
 
-    # Build payload
     song = session.exec(
         select(Song).where(Song.song_id == next_item.song_id)
     ).first()
@@ -241,4 +238,42 @@ def play_next(data: PlayNextRequest, session: Session = Depends(get_session)):
     return {
         "message": f"Now playing: {now_playing['title']}",
         "now_playing": now_playing,
+    }
+
+
+@router.get("/participants/{stream_id}")
+def get_stream_participants(stream_id: str, session: Session = Depends(get_session)):
+    """
+    Returns full user list in a stream, including admin status.
+    """
+
+    participants = session.exec(
+        select(StreamParticipant).where(StreamParticipant.stream_id == stream_id)
+    ).all()
+
+    if not participants:
+        raise HTTPException(status_code=404, detail="Stream not found or has no participants")
+
+    user_ids = [p.user_id for p in participants]
+
+    users = session.exec(
+        select(User).where(User.user_id.in_(user_ids))
+    ).all()
+
+    result = []
+    for p in participants:
+        u = next(u for u in users if u.user_id == p.user_id)
+        result.append({
+            "user_id": u.user_id,
+            "name": u.name,
+            "username": u.username,
+            "profile_pic": u.profile_pic,
+            "is_admin": p.is_admin,
+            "joined_at": p.joined_at,
+            "last_seen_at": p.last_seen_at,
+        })
+
+    return {
+        "stream_id": stream_id,
+        "participants": result
     }
