@@ -1,33 +1,38 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlmodel import Session, select
+from sqlmodel import Session, select, func
 from db.database import get_session
-from db.models import Song, Stream
+from db.models import Song, Stream, StreamQueueItem
 from typing import Optional
 from pydantic import BaseModel
+from utils.notify import notify_stream_background
 
-router = APIRouter()
+router = APIRouter(prefix="/queue", tags=["Queue"])
 
 
-# ===============================
-# Request Models
-# ===============================
 class AddSongRequest(BaseModel):
     stream_id: str
-    song_id: str
+    song_id: str           # YouTube video ID
     title: str
     artist: Optional[str] = None
     duration: Optional[int] = None
     thumbnail_url: Optional[str] = None
     audio_url: Optional[str] = None
+    added_by: str          # Firebase uid (for now directly sent)
 
 
-# ===============================
-# Add song to queue
-# ===============================
 @router.post("/add")
 def add_song_to_queue(data: AddSongRequest, session: Session = Depends(get_session)):
+    # Check stream
+    stream = session.exec(
+        select(Stream).where(Stream.stream_id == data.stream_id)
+    ).first()
+    if not stream:
+        raise HTTPException(status_code=404, detail="Stream not found")
+
     # Check or create song in DB
-    song = session.exec(select(Song).where(Song.song_id == data.song_id)).first()
+    song = session.exec(
+        select(Song).where(Song.song_id == data.song_id)
+    ).first()
     if not song:
         song = Song(
             song_id=data.song_id,
@@ -36,54 +41,76 @@ def add_song_to_queue(data: AddSongRequest, session: Session = Depends(get_sessi
             duration=data.duration,
             thumbnail_url=data.thumbnail_url,
             audio_url=data.audio_url,
-            stream_id=data.stream_id
         )
         session.add(song)
         session.commit()
+        session.refresh(song)
 
-    # Fetch stream
-    stream = session.exec(select(Stream).where(Stream.stream_id == data.stream_id)).first()
-    if not stream:
-        raise HTTPException(status_code=404, detail="Stream not found")
+    # Find next position
+    max_pos = session.exec(
+        select(func.max(StreamQueueItem.position)).where(
+            StreamQueueItem.stream_id == data.stream_id
+        )
+    ).first()
+    next_pos = (max_pos or 0) + 1
 
-    # Append song to stream queue (persistent)
-    stream.queue.append(data.song_id)
-    session.add(stream)
+    queue_item = StreamQueueItem(
+        stream_id=data.stream_id,
+        song_id=song.song_id,
+        position=next_pos,
+        status="queued",
+        added_by=data.added_by,
+    )
+    session.add(queue_item)
     session.commit()
-    session.refresh(stream)
+    session.refresh(queue_item)
 
-    return {"message": "Song added to queue", "queue": stream.queue}
+    # Build updated queue to broadcast
+    from ws.websocket import get_queue_for_stream
+    queue = get_queue_for_stream(session, data.stream_id)
+    notify_stream_background(
+        data.stream_id,
+        "QUEUE_UPDATED",
+        {"queue": queue},
+    )
+
+    return {"message": "Song added to queue", "queue_item_id": queue_item.id, "queue": queue}
 
 
-# ===============================
-# Get full queue
-# ===============================
 @router.get("/{stream_id}")
 def get_queue(stream_id: str, session: Session = Depends(get_session)):
-    stream = session.exec(select(Stream).where(Stream.stream_id == stream_id)).first()
-    if not stream or not stream.queue:
-        return {"queue": []}
-
-    # Fetch songs from DB and preserve order
-    songs = session.exec(select(Song).where(Song.song_id.in_(stream.queue))).all()
-    song_dict = {s.song_id: s for s in songs}
-    ordered_queue = [song_dict[sid] for sid in stream.queue if sid in song_dict]
-
-    return {"queue": ordered_queue}
+    from ws.websocket import get_queue_for_stream
+    queue = get_queue_for_stream(session, stream_id)
+    return {"queue": queue}
 
 
-# ===============================
-# Pop first song from queue
-# ===============================
 @router.delete("/{stream_id}/pop")
 def pop_song(stream_id: str, session: Session = Depends(get_session)):
-    stream = session.exec(select(Stream).where(Stream.stream_id == stream_id)).first()
-    if not stream or not stream.queue:
+    """
+    Remove the first queued item (lowest position) and return it.
+    """
+    item = session.exec(
+        select(StreamQueueItem)
+        .where(
+            (StreamQueueItem.stream_id == stream_id)
+            & (StreamQueueItem.status == "queued")
+        )
+        .order_by(StreamQueueItem.position.asc())
+    ).first()
+
+    if not item:
         raise HTTPException(status_code=404, detail="Queue empty")
 
-    removed_song_id = stream.queue.pop(0)
-    session.add(stream)
+    item.status = "removed"
+    session.add(item)
     session.commit()
-    session.refresh(stream)
 
-    return {"message": "Song removed from queue", "removed_song_id": removed_song_id}
+    from ws.websocket import get_queue_for_stream
+    queue = get_queue_for_stream(session, stream_id)
+    notify_stream_background(
+        stream_id,
+        "QUEUE_UPDATED",
+        {"queue": queue},
+    )
+
+    return {"message": "Song removed from queue", "removed_queue_item_id": item.id}
