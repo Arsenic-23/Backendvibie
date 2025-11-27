@@ -10,7 +10,7 @@ class User(SQLModel, table=True):
     User identified by Firebase UID.
     user_id is the Firebase uid (no Telegram).
     """
-    user_id: str = Field(primary_key=True, index=True)  # Firebase UID
+    user_id: str = Field(primary_key=True, index=True) 
     name: str
     username: Optional[str] = None
     profile_pic: Optional[str] = None
@@ -21,7 +21,7 @@ class Song(SQLModel, table=True):
     Song metadata fetched via ytdlp.
     song_id is typically the YouTube video ID.
     """
-    song_id: str = Field(primary_key=True, index=True)  # e.g. YouTube video id
+    song_id: str = Field(primary_key=True, index=True)
     title: str
     artist: Optional[str] = None
     duration: Optional[int] = None  # seconds
@@ -61,10 +61,6 @@ class StreamParticipant(SQLModel, table=True):
     joined_at: datetime = Field(default_factory=datetime.utcnow)
     last_seen_at: datetime = Field(default_factory=datetime.utcnow)
 
-
-# ===============================
-# StreamQueueItem (ordered queue per stream)
-# ===============================
 class StreamQueueItem(SQLModel, table=True):
     """
     Each row is one song in a stream's queue.
@@ -79,5 +75,4 @@ class StreamQueueItem(SQLModel, table=True):
     added_by: str = Field(foreign_key="user.user_id")
     added_at: datetime = Field(default_factory=datetime.utcnow)
 
-    # Extra metadata if needed (e.g. provider = youtube, etc.)
     extra: Optional[dict] = Field(default=None, sa_column=Column(SQLJSON))
