@@ -1,88 +1,187 @@
+# ws/websocket.py
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlmodel import Session, select
 from db.database import get_session
-from db.models import User, Stream, Song
+from db.models import User, Stream, Song, StreamQueueItem
 from utils.memory import active_vibers, active_connections
 import json
 
 router = APIRouter()
 
+
 def get_user_info(user: User):
     return {
         "user_id": user.user_id,
         "name": user.name,
-        "profile_pic": user.profile_pic
+        "profile_pic": user.profile_pic,
     }
 
+
 async def broadcast_to_stream(stream_id: str, message: dict):
-    for ws in active_connections.get(stream_id, []):
-        await ws.send_text(json.dumps(message))
+    """
+    Broadcast a JSON message to all active WebSockets in a stream.
+    """
+    connections = active_connections.get(stream_id, [])
+    data = json.dumps(message)
+    for ws in list(connections):
+        try:
+            await ws.send_text(data)
+        except Exception:
+            # If send fails, remove connection
+            connections.remove(ws)
+
+
+def get_now_playing(session: Session, stream_id: str):
+    """
+    Read global player state from Stream + metadata from Song.
+    """
+    stream = session.exec(
+        select(Stream).where(Stream.stream_id == stream_id)
+    ).first()
+    if not stream or not stream.current_queue_item_id:
+        return None
+
+    queue_item = session.exec(
+        select(StreamQueueItem).where(StreamQueueItem.id == stream.current_queue_item_id)
+    ).first()
+    if not queue_item:
+        return None
+
+    song = session.exec(
+        select(Song).where(Song.song_id == queue_item.song_id)
+    ).first()
+    if not song:
+        return None
+
+    return {
+        "queue_item_id": queue_item.id,
+        "song_id": song.song_id,
+        "title": song.title,
+        "artist": song.artist,
+        "thumbnail_url": song.thumbnail_url,
+        "audio_url": song.audio_url,
+        "status": stream.playback_status,
+        "position_ms": stream.playback_position_ms,
+        "updated_at": stream.playback_updated_at.isoformat()
+        if stream.playback_updated_at
+        else None,
+    }
+
+
+def get_queue_for_stream(session: Session, stream_id: str):
+    """
+    Ordered queue (only queued/playing items) with metadata from Song.
+    """
+    items = session.exec(
+        select(StreamQueueItem)
+        .where(
+            (StreamQueueItem.stream_id == stream_id)
+            & (StreamQueueItem.status.in_(["queued", "playing"]))
+        )
+        .order_by(StreamQueueItem.position.asc())
+    ).all()
+
+    # Fetch all songs at once
+    song_ids = [i.song_id for i in items]
+    if not song_ids:
+        return []
+
+    songs = session.exec(
+        select(Song).where(Song.song_id.in_(song_ids))
+    ).all()
+    song_map = {s.song_id: s for s in songs}
+
+    queue = []
+    for item in items:
+        song = song_map.get(item.song_id)
+        if not song:
+            continue
+        queue.append(
+            {
+                "queue_item_id": item.id,
+                "song_id": song.song_id,
+                "title": song.title,
+                "artist": song.artist,
+                "thumbnail_url": song.thumbnail_url,
+                "audio_url": song.audio_url,
+                "position": item.position,
+                "status": item.status,
+                "added_by": item.added_by,
+                "added_at": item.added_at.isoformat(),
+            }
+        )
+    return queue
+
 
 @router.websocket("/ws/stream/{stream_id}")
 async def stream_ws(websocket: WebSocket, stream_id: str, user_id: str):
+    """
+    WebSocket connection per stream.
+    For now we accept user_id as query param; later wire this to Firebase token.
+    """
     await websocket.accept()
 
     session = next(get_session())
-    
+
     # Get user from DB
-    user = session.exec(select(User).where(User.user_id == user_id)).first()
+    user = session.exec(
+        select(User).where(User.user_id == user_id)
+    ).first()
     if not user:
-        await websocket.send_text(json.dumps({"error": "User not found"}))
+        await websocket.send_text(json.dumps({"type": "ERROR", "message": "User not found"}))
         await websocket.close()
         return
 
-    # Add user to active vibers and connections
-    active_vibers.setdefault(stream_id, []).append(get_user_info(user))
-    active_connections.setdefault(stream_id, []).append(websocket)
+    # Get stream from DB (optional check)
+    stream = session.exec(
+        select(Stream).where(Stream.stream_id == stream_id)
+    ).first()
+    if not stream:
+        await websocket.send_text(json.dumps({"type": "ERROR", "message": "Stream not found"}))
+        await websocket.close()
+        return
 
-    # Send updated stream state to everyone
-    await broadcast_to_stream(stream_id, {
-        "type": "sync",
-        "vibers": active_vibers[stream_id],
-        "now_playing": get_now_playing(session, stream_id),
-        "queue": get_queue_for_stream(session, stream_id)
-    })
+    # Register connection & presence
+    active_connections.setdefault(stream_id, []).append(websocket)
+    vibers = active_vibers.setdefault(stream_id, [])
+
+    if not any(v["user_id"] == user.user_id for v in vibers):
+        vibers.append(get_user_info(user))
+
+    # Initial sync
+    await broadcast_to_stream(
+        stream_id,
+        {
+            "type": "STREAM_STATE",
+            "vibers": vibers,
+            "now_playing": get_now_playing(session, stream_id),
+            "queue": get_queue_for_stream(session, stream_id),
+        },
+    )
 
     try:
         while True:
-            await websocket.receive_text()  # Keep connection alive
+            # For now we just keep the connection alive.
+            # Later we can handle client events (PING, PLAYER_ACTION, etc.).
+            _ = await websocket.receive_text()
     except WebSocketDisconnect:
-        # Remove user from memory
-        active_vibers[stream_id] = [v for v in active_vibers[stream_id] if v["user_id"] != user_id]
-        active_connections[stream_id].remove(websocket)
+        # Remove connection & presence
+        conns = active_connections.get(stream_id, [])
+        if websocket in conns:
+            conns.remove(websocket)
+        vibers = active_vibers.get(stream_id, [])
+        active_vibers[stream_id] = [
+            v for v in vibers if v["user_id"] != user.user_id
+        ]
+        if not active_vibers[stream_id]:
+            del active_vibers[stream_id]
 
-        # Update remaining users
-        await broadcast_to_stream(stream_id, {
-            "type": "sync",
-            "vibers": active_vibers[stream_id],
-            "now_playing": get_now_playing(session, stream_id),
-            "queue": get_queue_for_stream(session, stream_id)
-        })
-
-# Utility to get now playing song details
-def get_now_playing(session: Session, stream_id: str):
-    stream = session.exec(select(Stream).where(Stream.stream_id == stream_id)).first()
-    if not stream or not stream.now_playing_song_id:
-        return None
-
-    song = session.exec(select(Song).where(Song.id == stream.now_playing_song_id)).first()
-    return {
-        "id": song.id,
-        "title": song.title,
-        "artist": song.artist,
-        "thumbnail": song.thumbnail,
-        "url": song.url
-    } if song else None
-
-# Utility to get queue for stream
-def get_queue_for_stream(session: Session, stream_id: str):
-    return [
-        {
-            "id": song.id,
-            "title": song.title,
-            "artist": song.artist,
-            "thumbnail": song.thumbnail,
-            "url": song.url
-        }
-        for song in session.exec(select(Song).where(Song.stream_id == stream_id)).all()
-    ]
+        await broadcast_to_stream(
+            stream_id,
+            {
+                "type": "VIBERS_UPDATED",
+                "vibers": active_vibers.get(stream_id, []),
+                "now_playing": get_now_playing(session, stream_id),
+                "queue": get_queue_for_stream(session, stream_id),
+            },
+        )
