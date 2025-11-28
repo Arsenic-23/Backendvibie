@@ -1,4 +1,4 @@
-# routers/stream.py
+ # routers/stream.py
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select, func
 from db.database import get_session
@@ -8,34 +8,33 @@ from typing import Optional
 import uuid
 from datetime import datetime
 from utils.notify import notify_stream_background
+from utils.auth import verify_firebase_token
+from utils.firebase import get_firestore
 
 router = APIRouter(prefix="/stream", tags=["Stream"])
 
 
 class CreateStreamRequest(BaseModel):
-    user_id: str
     title: Optional[str] = None
     visibility: Optional[str] = "public"
 
 
 class JoinStreamRequest(BaseModel):
-    user_id: str
     stream_id: str
 
 
 class LeaveStreamRequest(BaseModel):
-    user_id: str
     stream_id: str
 
 
 class PlayNextRequest(BaseModel):
     stream_id: str
-    user_id: str
 
 
 def ensure_user(session: Session, user_id: str, name: Optional[str] = None) -> User:
     """
     Ensures a user exists in DB. Creates if not found.
+    Also syncs basic profile to Firestore for future chat.
     """
     user = session.exec(
         select(User).where(User.user_id == user_id)
@@ -50,13 +49,33 @@ def ensure_user(session: Session, user_id: str, name: Optional[str] = None) -> U
         session.commit()
         session.refresh(user)
 
+    # Sync minimal profile to Firestore
+    try:
+        db = get_firestore()
+        db.collection("users").document(user_id).set(
+            {
+                "uid": user_id,
+                "name": user.name,
+                "username": user.username,
+                "profile_pic": user.profile_pic,
+                "updated_at": datetime.utcnow(),
+            },
+            merge=True,
+        )
+    except Exception:
+        # Firestore failure should not break core flow
+        pass
+
     return user
 
 
 @router.post("/create")
-def create_stream(data: CreateStreamRequest, session: Session = Depends(get_session)):
-
-    user = ensure_user(session, data.user_id)
+def create_stream(
+    data: CreateStreamRequest,
+    session: Session = Depends(get_session),
+    firebase_uid: str = Depends(verify_firebase_token),
+):
+    user = ensure_user(session, firebase_uid)
 
     stream_id = str(uuid.uuid4())[:8]
 
@@ -93,8 +112,11 @@ def create_stream(data: CreateStreamRequest, session: Session = Depends(get_sess
 
 
 @router.post("/join")
-def join_stream(data: JoinStreamRequest, session: Session = Depends(get_session)):
-
+def join_stream(
+    data: JoinStreamRequest,
+    session: Session = Depends(get_session),
+    firebase_uid: str = Depends(verify_firebase_token),
+):
     stream = session.exec(
         select(Stream).where(Stream.stream_id == data.stream_id)
     ).first()
@@ -102,19 +124,19 @@ def join_stream(data: JoinStreamRequest, session: Session = Depends(get_session)
     if not stream:
         raise HTTPException(status_code=404, detail="Stream not found")
 
-    user = ensure_user(session, data.user_id)
+    user = ensure_user(session, firebase_uid)
 
     participant = session.exec(
         select(StreamParticipant).where(
             (StreamParticipant.stream_id == data.stream_id)
-            & (StreamParticipant.user_id == data.user_id)
+            & (StreamParticipant.user_id == firebase_uid)
         )
     ).first()
 
     if not participant:
         participant = StreamParticipant(
             stream_id=data.stream_id,
-            user_id=data.user_id,
+            user_id=firebase_uid,
             is_admin=False,
         )
         session.add(participant)
@@ -124,9 +146,13 @@ def join_stream(data: JoinStreamRequest, session: Session = Depends(get_session)
         "message": f"{user.name} joined stream {data.stream_id}"
     }
 
-@router.post("/leave")
-def leave_stream(data: LeaveStreamRequest, session: Session = Depends(get_session)):
 
+@router.post("/leave")
+def leave_stream(
+    data: LeaveStreamRequest,
+    session: Session = Depends(get_session),
+    firebase_uid: str = Depends(verify_firebase_token),
+):
     stream = session.exec(
         select(Stream).where(Stream.stream_id == data.stream_id)
     ).first()
@@ -137,7 +163,7 @@ def leave_stream(data: LeaveStreamRequest, session: Session = Depends(get_sessio
     participant = session.exec(
         select(StreamParticipant).where(
             (StreamParticipant.stream_id == data.stream_id)
-            & (StreamParticipant.user_id == data.user_id)
+            & (StreamParticipant.user_id == firebase_uid)
         )
     ).first()
 
@@ -147,20 +173,23 @@ def leave_stream(data: LeaveStreamRequest, session: Session = Depends(get_sessio
     session.delete(participant)
     session.commit()
 
-    remaining = session.exec(
+    _ = session.exec(
         select(func.count()).select_from(StreamParticipant).where(
             StreamParticipant.stream_id == data.stream_id
         )
     ).one()
 
     return {
-        "message": f"User {data.user_id} left the stream {data.stream_id}"
+        "message": f"User {firebase_uid} left the stream {data.stream_id}"
     }
 
 
 @router.post("/queue/next")
-def play_next(data: PlayNextRequest, session: Session = Depends(get_session)):
-
+def play_next(
+    data: PlayNextRequest,
+    session: Session = Depends(get_session),
+    firebase_uid: str = Depends(verify_firebase_token),
+):
     stream = session.exec(
         select(Stream).where(Stream.stream_id == data.stream_id)
     ).first()
@@ -168,6 +197,7 @@ def play_next(data: PlayNextRequest, session: Session = Depends(get_session)):
     if not stream:
         raise HTTPException(status_code=404, detail="Stream not found")
 
+    # Mark current as played
     if stream.current_queue_item_id:
         current_item = session.exec(
             select(StreamQueueItem).where(StreamQueueItem.id == stream.current_queue_item_id)
@@ -177,6 +207,7 @@ def play_next(data: PlayNextRequest, session: Session = Depends(get_session)):
             current_item.status = "played"
             session.add(current_item)
 
+    # Next queued item
     next_item = session.exec(
         select(StreamQueueItem)
         .where(
@@ -242,7 +273,11 @@ def play_next(data: PlayNextRequest, session: Session = Depends(get_session)):
 
 
 @router.get("/participants/{stream_id}")
-def get_stream_participants(stream_id: str, session: Session = Depends(get_session)):
+def get_stream_participants(
+    stream_id: str,
+    session: Session = Depends(get_session),
+    firebase_uid: str = Depends(verify_firebase_token),
+):
     """
     Returns full user list in a stream, including admin status.
     """
@@ -275,5 +310,5 @@ def get_stream_participants(stream_id: str, session: Session = Depends(get_sessi
 
     return {
         "stream_id": stream_id,
-        "participants": result
+        "participants": result,
     }
