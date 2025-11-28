@@ -1,0 +1,22 @@
+# utils/firebase.py
+import os
+import firebase_admin
+from firebase_admin import credentials, auth, firestore
+
+# Path to your service account key
+# Prefer env var; fallback to local file
+FIREBASE_CREDENTIALS_PATH = os.getenv(
+    "FIREBASE_CREDENTIALS",
+    "firebase_credentials.json",  # put this in your project root
+)
+
+if not firebase_admin._apps:
+    cred = credentials.Certificate(FIREBASE_CREDENTIALS_PATH)
+    firebase_admin.initialize_app(cred)
+
+# Firestore client (for chat, user profiles, etc.)
+firestore_db = firestore.client()
+
+
+def get_firestore():
+    return firestore_db
