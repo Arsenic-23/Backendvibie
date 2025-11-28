@@ -2,35 +2,52 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select, func
 from db.database import get_session
-from db.models import Song, Stream, StreamQueueItem
+from db.models import Song, Stream, StreamQueueItem, User
 from typing import Optional
 from pydantic import BaseModel
 from utils.notify import notify_stream_background
+from utils.auth import verify_firebase_token
 
 router = APIRouter(prefix="/queue", tags=["Queue"])
 
 
 class AddSongRequest(BaseModel):
     stream_id: str
-    song_id: str           # YouTube video ID
+    song_id: str           
     title: str
     artist: Optional[str] = None
     duration: Optional[int] = None
     thumbnail_url: Optional[str] = None
     audio_url: Optional[str] = None
-    added_by: str          # Firebase uid (for now directly sent)
+
+
+def ensure_user(session: Session, user_id: str) -> User:
+    user = session.exec(
+        select(User).where(User.user_id == user_id)
+    ).first()
+    if not user:
+        user = User(user_id=user_id, name=f"User {user_id}")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+    return user
 
 
 @router.post("/add")
-def add_song_to_queue(data: AddSongRequest, session: Session = Depends(get_session)):
-    # Check stream
+def add_song_to_queue(
+    data: AddSongRequest,
+    session: Session = Depends(get_session),
+    firebase_uid: str = Depends(verify_firebase_token),
+)
+
+    ensure_user(session, firebase_uid)
+
     stream = session.exec(
         select(Stream).where(Stream.stream_id == data.stream_id)
     ).first()
     if not stream:
         raise HTTPException(status_code=404, detail="Stream not found")
 
-    # Check or create song in DB
     song = session.exec(
         select(Song).where(Song.song_id == data.song_id)
     ).first()
@@ -46,8 +63,7 @@ def add_song_to_queue(data: AddSongRequest, session: Session = Depends(get_sessi
         session.add(song)
         session.commit()
         session.refresh(song)
-
-    # Find next position
+        
     max_pos = session.exec(
         select(func.max(StreamQueueItem.position)).where(
             StreamQueueItem.stream_id == data.stream_id
@@ -60,13 +76,12 @@ def add_song_to_queue(data: AddSongRequest, session: Session = Depends(get_sessi
         song_id=song.song_id,
         position=next_pos,
         status="queued",
-        added_by=data.added_by,
+        added_by=firebase_uid,
     )
     session.add(queue_item)
     session.commit()
     session.refresh(queue_item)
 
-    # Build updated queue to broadcast
     from ws.websocket import get_queue_for_stream
     queue = get_queue_for_stream(session, data.stream_id)
     notify_stream_background(
@@ -79,14 +94,22 @@ def add_song_to_queue(data: AddSongRequest, session: Session = Depends(get_sessi
 
 
 @router.get("/{stream_id}")
-def get_queue(stream_id: str, session: Session = Depends(get_session)):
+def get_queue(
+    stream_id: str,
+    session: Session = Depends(get_session),
+    firebase_uid: str = Depends(verify_firebase_token),
+):
     from ws.websocket import get_queue_for_stream
     queue = get_queue_for_stream(session, stream_id)
     return {"queue": queue}
 
 
 @router.delete("/{stream_id}/pop")
-def pop_song(stream_id: str, session: Session = Depends(get_session)):
+def pop_song(
+    stream_id: str,
+    session: Session = Depends(get_session),
+    firebase_uid: str = Depends(verify_firebase_token),
+):
     """
     Remove the first queued item (lowest position) and return it.
     """
