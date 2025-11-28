@@ -24,9 +24,9 @@ class Song(SQLModel, table=True):
     song_id: str = Field(primary_key=True, index=True)
     title: str
     artist: Optional[str] = None
-    duration: Optional[int] = None  # seconds
+    duration: Optional[int] = None 
     thumbnail_url: Optional[str] = None
-    audio_url: Optional[str] = None  # from your ytdlp backend
+    audio_url: Optional[str] = None  
 
 class Stream(SQLModel, table=True):
     """
@@ -36,16 +36,15 @@ class Stream(SQLModel, table=True):
     stream_id: str = Field(primary_key=True, index=True)
 
     host_id: str = Field(foreign_key="user.user_id")
-    visibility: Optional[str] = Field(default="public")  # public/private
+    visibility: Optional[str] = Field(default="public") 
     title: Optional[str] = None
 
-    # Global player state (per stream)
     current_queue_item_id: Optional[int] = Field(
         default=None, foreign_key="streamqueueitem.id"
     )
-    playback_status: str = Field(default="stopped")  # 'playing' | 'paused' | 'stopped'
-    playback_position_ms: int = Field(default=0)     # at last state change
-    playback_updated_at: Optional[datetime] = None   # server time when state last changed
+    playback_status: str = Field(default="stopped") 
+    playback_position_ms: int = Field(default=0)    
+    playback_updated_at: Optional[datetime] = None   
 
     start_time: Optional[datetime] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -66,11 +65,11 @@ class StreamQueueItem(SQLModel, table=True):
     Each row is one song in a stream's queue.
     """
     id: Optional[int] = Field(default=None, primary_key=True)
-    stream_id: str = Field(fore_key="stream.stream_id", index=True)  # NOTE: fix typo: foreign_key
+    stream_id: str = Field(foreign_key="stream.stream_id", index=True)
     song_id: str = Field(foreign_key="song.song_id", index=True)
 
-    position: int = Field(index=True)  # ordering in queue
-    status: str = Field(default="queued")  # 'queued' | 'playing' | 'played' | 'skipped' | 'removed'
+    position: int = Field(index=True)  
+    status: str = Field(default="queued")  
 
     added_by: str = Field(foreign_key="user.user_id")
     added_at: datetime = Field(default_factory=datetime.utcnow)
