@@ -4,6 +4,7 @@ from sqlmodel import Session, select
 from db.database import get_session
 from db.models import User, Stream, Song, StreamQueueItem
 from utils.memory import active_vibers, active_connections
+from firebase_admin import auth as firebase_auth
 import json
 
 router = APIRouter()
@@ -27,7 +28,6 @@ async def broadcast_to_stream(stream_id: str, message: dict):
         try:
             await ws.send_text(data)
         except Exception:
-            # If send fails, remove connection
             connections.remove(ws)
 
 
@@ -81,7 +81,6 @@ def get_queue_for_stream(session: Session, stream_id: str):
         .order_by(StreamQueueItem.position.asc())
     ).all()
 
-    # Fetch all songs at once
     song_ids = [i.song_id for i in items]
     if not song_ids:
         return []
@@ -114,12 +113,33 @@ def get_queue_for_stream(session: Session, stream_id: str):
 
 
 @router.websocket("/ws/stream/{stream_id}")
-async def stream_ws(websocket: WebSocket, stream_id: str, user_id: str):
+async def stream_ws(websocket: WebSocket, stream_id: str):
     """
     WebSocket connection per stream.
-    For now we accept user_id as query param; later wire this to Firebase token.
+
+    Auth options:
+    - Preferred: ?token=<FIREBASE_ID_TOKEN>
+    - Dev fallback: ?user_id=<uid>
     """
     await websocket.accept()
+
+    params = websocket.query_params
+    token = params.get("token")
+    user_id = params.get("user_id")
+
+    if token:
+        try:
+            decoded = firebase_auth.verify_id_token(token)
+            user_id = decoded["uid"]
+        except Exception:
+            await websocket.send_text(json.dumps({"type": "ERROR", "message": "Invalid Firebase token"}))
+            await websocket.close()
+            return
+
+    if not user_id:
+        await websocket.send_text(json.dumps({"type": "ERROR", "message": "Missing user_id/token"}))
+        await websocket.close()
+        return
 
     session = next(get_session())
 
@@ -132,7 +152,7 @@ async def stream_ws(websocket: WebSocket, stream_id: str, user_id: str):
         await websocket.close()
         return
 
-    # Get stream from DB (optional check)
+    # Get stream from DB
     stream = session.exec(
         select(Stream).where(Stream.stream_id == stream_id)
     ).first()
@@ -141,14 +161,12 @@ async def stream_ws(websocket: WebSocket, stream_id: str, user_id: str):
         await websocket.close()
         return
 
-    # Register connection & presence
     active_connections.setdefault(stream_id, []).append(websocket)
     vibers = active_vibers.setdefault(stream_id, [])
 
     if not any(v["user_id"] == user.user_id for v in vibers):
         vibers.append(get_user_info(user))
 
-    # Initial sync
     await broadcast_to_stream(
         stream_id,
         {
@@ -161,11 +179,8 @@ async def stream_ws(websocket: WebSocket, stream_id: str, user_id: str):
 
     try:
         while True:
-            # For now we just keep the connection alive.
-            # Later we can handle client events (PING, PLAYER_ACTION, etc.).
             _ = await websocket.receive_text()
     except WebSocketDisconnect:
-        # Remove connection & presence
         conns = active_connections.get(stream_id, [])
         if websocket in conns:
             conns.remove(websocket)
@@ -174,7 +189,7 @@ async def stream_ws(websocket: WebSocket, stream_id: str, user_id: str):
             v for v in vibers if v["user_id"] != user.user_id
         ]
         if not active_vibers[stream_id]:
-            del active_vibers[stream_id]
+            active_vibers.pop(stream_id, None)
 
         await broadcast_to_stream(
             stream_id,
